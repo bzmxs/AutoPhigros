@@ -2,23 +2,49 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
-    android:orientation="horizontal"
-    android:background="#DD000000"
-    android:padding="8dp"
-    android:gravity="center">
+    android:orientation="vertical"
+    android:background="#CC000000"
+    android:padding="8dp">
 
-    <Button
-        android:id="@+id/btn_start"
-        android:text="▶"
-        android:textSize="18sp"
-        android:layout_width="48dp"
-        android:layout_height="48dp" />
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
 
-    <Button
-        android:id="@+id/btn_stop"
-        android:text="⏹"
-        android:textSize="18sp"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:layout_marginStart="8dp" />
+        <!-- 开始：长按 = 偷偷抓一帧存 PNG（调试用，不占按钮位） -->
+        <Button
+            android:id="@+id/btn_start"
+            android:text="▶"
+            android:textSize="18sp"
+            android:layout_width="48dp"
+            android:layout_height="48dp" />
+
+        <Button
+            android:id="@+id/btn_stop"
+            android:text="⏹"
+            android:textSize="18sp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="6dp" />
+
+        <!-- 退出：只关闭这块悬浮窗，录屏服务和识别都保留 -->
+        <Button
+            android:id="@+id/btn_exit"
+            android:text="✖"
+            android:textSize="16sp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="6dp" />
+    </LinearLayout>
+
+    <!-- 实时状态：尺寸 / 识别帧率 / 命中数 / 点击频率；整块面板可以按住拖动 -->
+    <TextView
+        android:id="@+id/tv_status"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="≡ 未启动"
+        android:textColor="#FF00E676"
+        android:textSize="10sp" />
 </LinearLayout>

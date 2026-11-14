@@ -1,10 +1,17 @@
 # AutoPhigros 🎵
 
-[![Version](https://img.shields.io/badge/version-0.1.0--beta-blue)](https://github.com/BZMXS/AutoPhigros)
+[![Version](https://img.shields.io/badge/version-0.2.0--beta-blue)](https://github.com/bzmxs/AutoPhigros)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> **一个 Android 上的 Phigros / Phira 自动打歌工具（测试版）(无法正常使用！！！有时间再修)**  
+> **一个 Android 上的 Phigros / Phira 自动打歌工具（测试版）**  
 > 通过实时录屏识别音符，配合无障碍服务模拟点击，让你解放双手。
+
+---
+
+## ✨ 最新更新 (v0.2.0-beta)
+- **🚀 一键启动游戏**：主界面新增“打开 Phigros”与“打开 Phira”快捷按钮，省去切后台的烦恼。
+- **⚡ 深度算法优化**：彻底重构底层图像读取逻辑，**疑似解决录屏识别时的卡顿掉帧问题**。
+- **🎯 智能判定线**：判定线位置自适应动态计算，识别更精准确。
 
 ---
 
@@ -13,17 +20,14 @@
 - ✅ **实时录屏识别** – 获取屏幕画面，检测音符位置
 - ✅ **无障碍点击** – 无需 Root，通过 Android 无障碍服务模拟手指点击
 - ✅ **悬浮窗控制** – 随时开始/停止，不影响游戏操作
-- ✅ **轻量级颜色识别** – 快速检测蓝色（Tap）和红色（Flick）音符
-- ✅ **适配动态分辨率** – 自动适配不同手机屏幕
+- ✅ **轻量级颜色识别** – 快速检测四种音符
 
 ---
 
-## 🚧 当前版本限制（测试版 v0.1.0）
+## 🚧 当前版本限制（测试版 v0.2.0-beta）
 
 > ⚠️ 本项目目前为 **概念验证（PoC）** 阶段，请合理使用，避免被封号风险。
 
-- 仅识别 **屏幕中央水平线** 附近的音符（判定线固定位置）
-- 只支持 **蓝色（Tap）** 和 **红色（Flick）** 音符的颜色检测，**暂不支持黄色长按（Hold）**
 - 对背景复杂的谱面可能误判
 - **需要手动开启无障碍服务**，否则无法点击
 
@@ -40,42 +44,26 @@
 
 ## 🚀 快速开始
 
-### 1. 下载安装
-- 从 [Releases](https://github.com/BZMXS/AutoPhigros/releases) 下载最新的 `app-debug.apk`
-- 或自行克隆源码，用 Android Studio 编译安装
-
-### 2. 开启无障碍服务
-进入手机 **设置 → 无障碍**，找到 **AutoClickService**，打开开关。
-
-### 3. 打开 App 并授权
-- 点击 **“启动悬浮窗”**
-- 允许 **悬浮窗权限**
-- 允许 **录屏权限**（点击“立即开始”）
-
-### 4. 进入游戏
-- 打开 Phigros 或 Phira，进入任意歌曲
-- 点击悬浮窗的 ▶ 按钮开始自动识别
-- 点击 ⏹ 按钮停止
-
----
-
-## 📦 依赖
-
-| 依赖 | 用途 |
-|------|------|
-| AndroidX AppCompat | 基础 UI 支持 |
-| AndroidX Core | 前台服务通知支持 |
-
-> 本项目未使用第三方图像识别库，仅采用原生像素扫描，因此体积小巧。
+1. 从 [Releases](https://github.com/bzmxs/AutoPhigros/releases) 下载最新的 `app-debug.apk`。
+2. 进入手机 **设置 → 无障碍**，找到 **AutoPhigrous**，打开开关。
+3. 打开 App，点击 **“启动悬浮窗”**，授权悬浮窗和录屏权限。
+4. 点击主界面的 **“一键打开 Phigros”**，进入游戏后点击悬浮窗的 ▶ 按钮开始自动识别。
 
 ---
 
 ## 🛠️ 构建与开发
 
-如果你想自己修改代码，请使用 Android Studio 打开项目。
+使用 Android Studio 打开项目，等待 Gradle 同步完成，连接手机点击 Run 即可。
 
-```bash
-git clone https://github.com/BZMXS/AutoPhigros.git
-cd AutoPhigros
-# 用 Android Studio 打开，等待 Gradle 同步完成
-# 连接手机，点击 Run 即可
+---
+
+## 📄 许可证
+
+本项目基于 **MIT License** 开源。
+
+---
+
+## ⚠️ 免责声明
+
+> 本工具仅供学习交流使用，请勿用于商业用途或破坏游戏公平性。  
+> 使用本工具可能导致游戏账号被限制，请自行承担风险。

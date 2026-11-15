@@ -240,6 +240,10 @@ public class FloatingControlService extends Service {
     private long statFrameCostSum = 0;
     private long statFrameCostMax = 0;
     private long statHoldFires = 0;
+    /** 每帧耗时指数平均：超过 10ms 隔一帧识别，超过 16ms 隔两帧 */
+    private float costEma = 0f;
+    private int skipEvery = 0;
+    private int skipCounter = 0;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -592,7 +596,16 @@ public class FloatingControlService extends Service {
         if (now - lastFrameAt < FRAME_MIN_INTERVAL_MS) return;  // 限速，别把 CPU 吃满
         lastFrameAt = now;
 
+        // 自适应降频：上一轮平均每帧耗时太高就隔帧识别。
+        // 宁可少看几帧，也不要让识别线程把 CPU 吃满、把游戏拖到掉帧。
+        if (skipEvery > 0) {
+            if (++skipCounter <= skipEvery) return;
+            skipCounter = 0;
+        }
+
         statFrames++;
+
+        long t0 = System.nanoTime();
 
         // 判定线：每帧都重新找一次（它会动），找到了就平滑地跟过去
         int near = trackJudgeLine(buffer, w, h, rowStride, pixelStride, judgeY);
@@ -613,13 +626,16 @@ public class FloatingControlService extends Service {
         if (judgeY >= h) judgeY = h - 1;
         judgeRatio = judgeY / (float) h;
 
-        long t0 = System.nanoTime();
         scanAndSchedule(buffer, w, h, rowStride, pixelStride, now);
-        // 记一下这一帧识别花了多久：如果它接近/超过帧间隔（16ms），
-        // 说明卡顿来自“算不过来”，而不是手势通道被占 —— 排查就靠这个数
+        // 记一下这一帧（找判定线 + 扫音符）花了多久：
+        // cost 接近/超过 16ms 说明卡顿来自“算不过来”，那就自动隔帧识别
         long costMs = (System.nanoTime() - t0) / 1_000_000L;
         statFrameCostSum += costMs;
         if (costMs > statFrameCostMax) statFrameCostMax = costMs;
+        costEma = costEma <= 0f ? costMs : costEma * 0.85f + costMs * 0.15f;
+        if (costEma > 16f) skipEvery = 2;
+        else if (costEma > 10f) skipEvery = 1;
+        else skipEvery = 0;
     }
 
     /**
@@ -704,9 +720,11 @@ public class FloatingControlService extends Service {
         // ---------- 量每段竖着有多高：Hold 是竖条，Tap/Drag 是矮的 ----------
         for (int i = 0; i < runCount; i++) {
             int cx = (runFirst[i] + runLast[i]) / 2;
-            if (cx >= 0 && cx < w) {
+            int wcap = runLast[i] - runFirst[i] + X_STEP;
+            // 太宽的段是整片背景，根本不用量高度（量了也是白花 CPU）
+            if (cx >= 0 && cx < w && wcap <= HOLD_MAX_WIDTH) {
                 runHeight[i] = verticalExtent(buffer, cx, runBottom[i], rowStride, pixelStride);
-                if (runHeight[i] > 400) runHeight[i] = 400;
+                if (runHeight[i] > 300) runHeight[i] = 300;
             }
         }
 
@@ -1145,16 +1163,17 @@ public class FloatingControlService extends Service {
         final long clicksPerSec = statClicks * 1000 / Math.max(elapsed, 1);
         final long droppedPerSec = statDropped * 1000 / Math.max(elapsed, 1);
         final int queue = pending.size();
+        final long costAvg = statFrameCostSum / Math.max(statFrames, 1);
         final String text = String.format(Locale.US,
-                "%dx%d %dfps 队:%d 点:%d/s 丢:%d/s 总:%d 条:%d 宽:%d 长:%d v:%d",
-                displayWidth, displayHeight, fps, queue, clicksPerSec, droppedPerSec,
+                "%dx%d %dfps c:%d/%d 队:%d 点:%d/s 丢:%d/s 总:%d 条:%d 宽:%d 长:%d v:%d",
+                displayWidth, displayHeight, fps, costAvg, statFrameCostMax,
+                queue, clicksPerSec, droppedPerSec,
                 totalClicks, lastWidestRun, lastHoldWidth, lastHoldLen, (int) noteSpeed);
 
         // 每 2 秒往 Logcat 打一行：识别帧率 + 队列/下发/丢弃 + 判定线与速度（调参就看这个）
         // cost：这一帧的识别耗时（均值/最大）。它要是接近 16ms，就说明卡在“算不过来”。
         if (now - lastLogAt >= 2000 && statFrames > 0) {
             lastLogAt = now;
-            long costAvg = statFrameCostSum / Math.max(statFrames, 1);
             Log.d(TAG, String.format(Locale.US,
                     "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d",
                     fps, costAvg, statFrameCostMax, queue, statClicks, statDropped, statHoldFires,
@@ -1203,6 +1222,9 @@ public class FloatingControlService extends Service {
             statFrameCostSum = 0;
             statFrameCostMax = 0;
             statHoldFires = 0;
+            costEma = 0f;
+            skipEvery = 0;
+            skipCounter = 0;
         });
         workerHandler.removeCallbacks(schedulerTick);
         workerHandler.post(schedulerTick);

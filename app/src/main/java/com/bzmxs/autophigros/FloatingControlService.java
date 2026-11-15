@@ -76,12 +76,11 @@ public class FloatingControlService extends Service {
      * 音符底边从“触发线上方”跨到“触发线下方”的那一帧，就是这个音符唯一一次被登记的时刻，
      * 然后按 距离÷速度 算出还要多久到判定线，到点了再点。
      * <p>
-     * 早先这里是 70 像素：提前量算成 ~130ms，而提前量 = 距离 ÷ 速度，
-     * 速度只要估偏 30%，点击就会早/晚三四十毫秒，密集谱面直接判 Miss。
-     * 现在提前量只有 28px（约 50ms），速度误差的影响被压到十几毫秒以内，
-     * 剩下的时间刚好补上“下发手势 → 游戏收到触摸”的那一两帧延迟。
+     * 早先这里是 70 像素（提前量 ~130ms），速度估偏 30% 就会错三四十毫秒；
+     * 试过 28 像素（~50ms）后发现整体变成 Late（结算 Late 20 / Early 3）——
+     * 说明 45 像素（~85ms）附近才是这两种误差的平衡点。
      */
-    private static final int TRIGGER_UP = 28;
+    private static final int TRIGGER_UP = 45;
 
     /** 触发线上下各扫多少像素（录制像素） */
     private static final int SCAN_UP = 42;
@@ -99,11 +98,13 @@ public class FloatingControlService extends Service {
     /**
      * 时间补偿（ms）：整体往后挪一点再点。
      * <p>
-     * 你那张结算图里是 Early 16 / Late 5 —— 早的明显多于晚的，
-     * 说明点击整体偏前（识别到 → 算时间 → 下发，整条链路每步都会“早一点点”）。
-     * 这里加 20ms 抵消，改大改小都能直接调这一个数。
+     * 这个值现在可以在悬浮窗上用 ⏱ 按钮实时调（-30 ~ +30，每步 10ms，存在 SharedPreferences 里），
+     * 结算界面看 Early / Late 哪个多就往反方向调：
+     * Late 多 → 调小（甚至负数）；Early 多 → 调大。
      */
-    private static final int TIMING_BIAS_MS = 20;
+    private volatile int timingBias = 0;
+    private static final String PREF_NAME = "autophigros";
+    private static final String PREF_TIMING = "timing_bias";
 
     /**
      * 又宽又扁、又不是 Hold 色的段 → 是背景亮块（歌曲封面、特效带），不是音符。
@@ -151,7 +152,7 @@ public class FloatingControlService extends Service {
     private static final int HOLD_MIN_MS = 120;
 
     /** 两次下发手势之间至少隔这么久（ms），别把系统输入队列塞爆 */
-    private static final int MIN_FIRE_GAP_MS = 45;
+    private static final int MIN_FIRE_GAP_MS = 16;
 
     /** 长按末尾多按一点（ms），宁可多按几十毫秒，也不要半路松手 */
     private static final int HOLD_MARGIN_MS = 60;
@@ -294,6 +295,7 @@ public class FloatingControlService extends Service {
     public void onCreate() {
         super.onCreate();
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        timingBias = getSharedPreferences(PREF_NAME, MODE_PRIVATE).getInt(PREF_TIMING, 0);
         workerThread = new HandlerThread("AutoPhigrosWorker");
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
@@ -349,7 +351,26 @@ public class FloatingControlService extends Service {
             Button btnStart = floatingView.findViewById(R.id.btn_start);
             Button btnStop = floatingView.findViewById(R.id.btn_stop);
             Button btnExit = floatingView.findViewById(R.id.btn_exit);
+            Button btnTune = floatingView.findViewById(R.id.btn_tune);
             tvStatus = floatingView.findViewById(R.id.tv_status);
+            btnTune.setText(tuneLabel());
+
+            // ⏱ 时序微调：-30 → -20 → -10 → 0 → +10 → +20 → +30 循环
+            // 结算里 Late 多就往负方向调（前移），Early 多就往正方向调（后移）
+            btnTune.setOnClickListener(v -> {
+                int[] steps = {-30, -20, -10, 0, 10, 20, 30};
+                int cur = 0;
+                for (int i = 0; i < steps.length; i++) {
+                    if (steps[i] == timingBias) { cur = i; break; }
+                }
+                timingBias = steps[(cur + 1) % steps.length];
+                getSharedPreferences(PREF_NAME, MODE_PRIVATE).edit()
+                        .putInt(PREF_TIMING, timingBias).apply();
+                btnTune.setText(tuneLabel());
+                Toast.makeText(this, String.format(Locale.US,
+                        "时序补偿 %+dms（Late 多就调负，Early 多就调正）", timingBias),
+                        Toast.LENGTH_SHORT).show();
+            });
 
             btnStart.setOnClickListener(v -> {
                 if (isRunning) {
@@ -899,7 +920,8 @@ public class FloatingControlService extends Service {
         } else {
             lead = 0;   // 速度还没测出来，先“看到就点”，至少不会完全不点
         }
-        long arrival = now + lead + TIMING_BIAS_MS;
+        long arrival = now + lead + timingBias;
+        if (arrival < now) arrival = now;   // ⏱ 调成负数时也别排到过去
         int x = centerX * captureScale;
         int bucket = x / 40;
 
@@ -1263,6 +1285,11 @@ public class FloatingControlService extends Service {
         }
     }
 
+    /** ⏱ 按钮上显示当前补偿值，比如 “+10” / “-20” / “0” */
+    private String tuneLabel() {
+        return (timingBias > 0 ? "+" : "") + timingBias;
+    }
+
     private void updateStatusIfDue(long now) {
         if (now - lastStatAt < 500) return;
         long elapsed = lastStatAt == 0 ? 500 : now - lastStatAt;
@@ -1282,10 +1309,10 @@ public class FloatingControlService extends Service {
         if (now - lastLogAt >= 2000 && statFrames > 0) {
             lastLogAt = now;
             Log.d(TAG, String.format(Locale.US,
-                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d",
+                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d bias=%d",
                     fps, costAvg, statFrameCostMax, queue, statClicks, statDropped, statBg, statHoldFires,
                     statBlue, statRed, statTan,
-                    judgeY, (int) noteSpeed, lastWidestRun, lastHoldWidth, lastHoldLen));
+                    judgeY, (int) noteSpeed, lastWidestRun, lastHoldWidth, lastHoldLen, timingBias));
         }
 
         statFrames = 0;

@@ -36,6 +36,15 @@
             android:layout_width="48dp"
             android:layout_height="48dp"
             android:layout_marginStart="6dp" />
+
+        <!-- 时序微调：每点一次把整体点击时间往前/往后挪 10ms，用来对着 Early/Late 校准 -->
+        <Button
+            android:id="@+id/btn_tune"
+            android:text="⏱"
+            android:textSize="16sp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="6dp" />
     </LinearLayout>
 
     <!-- 实时状态：尺寸 / 识别帧率 / 命中数 / 点击频率；整块面板可以按住拖动 -->

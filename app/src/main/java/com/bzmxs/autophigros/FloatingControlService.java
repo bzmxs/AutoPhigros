@@ -276,6 +276,8 @@ public class FloatingControlService extends Service {
     private long lastStatAt = 0;
     private long lastLogAt = 0;
     private long totalClicks = 0;
+    /** 累计“识别出来并成功排进队列”的音符数，用来和结算的总音符数对账 */
+    private long totalQueued = 0;
 
     /** 上一次真正下发手势的时刻（ms），用来限制下发频率 */
     private long lastFireAt = 0;
@@ -951,6 +953,7 @@ public class FloatingControlService extends Service {
         p.durMs = durMs;
         p.bucket = bucket;
         pending.add(p);
+        totalQueued++;
 
         Log.d(TAG, String.format(Locale.US,
                 "queue type=%d x=%d lead=%dms dur=%dms speed=%d w=%d h=%d cls=%d",
@@ -1307,11 +1310,12 @@ public class FloatingControlService extends Service {
         if (now - lastLogAt >= 2000 && statFrames > 0) {
             lastLogAt = now;
             Log.d(TAG, String.format(Locale.US,
-                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 丢hold=%d 丢晚=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d bias=%d",
+                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 丢hold=%d 丢晚=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d bias=%d 排队=%d",
                     fps, costAvg, statFrameCostMax, queue, statClicks, statDropped,
                     statDroppedHold, statDroppedLate, statBg, statHoldFires,
                     statBlue, statRed, statTan,
-                    judgeY, (int) noteSpeed, lastWidestRun, lastHoldWidth, lastHoldLen, timingBias));
+                    judgeY, (int) noteSpeed, lastWidestRun, lastHoldWidth, lastHoldLen, timingBias,
+                    totalQueued));
         }
 
         statFrames = 0;

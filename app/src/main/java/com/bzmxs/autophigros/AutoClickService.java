@@ -139,14 +139,21 @@ public class AutoClickService extends AccessibilityService {
     }
 
     /**
-     * 和 {@link #performBatch} 一样，但每个触点可以带一个“延迟多少毫秒再按下”。
+     * 和 {@link #performBatch} 一样，但允许调用方传一个 startsMs 数组。
      * <p>
-     * 这是为了解决“长按期间点不了”的问题：Android 一次只能跑一个手势，
-     * 但一个手势里可以塞多个触点，每个触点的 startTime 可以不同。
-     * 所以下长按的同时，把接下来 400ms 内要点的音符一起塞进同一个手势，
-     * 它们会在长按还按着的时候按 startTime 依次落下，不用等长按结束。
+     * ⚠️ 血的教训：**多指手势里所有触点必须同一瞬间按下**。
+     * 如果同一个手势里 0 号触点 startTime=0、1 号 startTime=20，
+     * Android 的 InputDispatcher 在拆分(MotionEvent)时会自己断言：
+     * <pre>
+     * Abort message: 'Split motion event has mismatching downTime and eventTime
+     * for ACTION_DOWN, motionEntry=MotionEvent(... action=POINTER_DOWN(0),
+     * pointers=[0: (824.0, 862.0), 1: (1116.0, 862.0)]), splitDownTime=...'
+     * </pre>
+     * 然后 <b>system_server 直接 SIGABRT 自杀</b>，表现就是整台设备/模拟器黑屏重载。
+     * 所以这里不管调用方传什么，都把整批统一成同一个起始时刻（取最小值），
+     * 让所有手指真的同时落下。要“错开时间”就只能分几次手势下发。
      *
-     * @param startsMs 每个触点的延迟（毫秒），null 表示全部立即
+     * @param startsMs 各触点的延迟（毫秒），null 表示全部立即；实际会被统一成最小值
      */
     public static boolean performBatchAt(int[] xs, int[] types, int[] dursMs, int[] startsMs,
                                          int y, int count, Runnable onFinished) {
@@ -155,9 +162,18 @@ public class AutoClickService extends AccessibilityService {
         if (xs == null || count <= 0) return false;
 
         int n = Math.min(count, maxStrokes());
+
+        // 统一起始时刻：多指手势的 downTime 必须完全一致，否则 system_server 会崩
+        long commonStart = 0;
+        if (startsMs != null) {
+            commonStart = Long.MAX_VALUE;
+            for (int i = 0; i < n; i++) commonStart = Math.min(commonStart, Math.max(0, startsMs[i]));
+            if (commonStart == Long.MAX_VALUE) commonStart = 0;
+        }
+
         GestureDescription.Builder builder = new GestureDescription.Builder();
         for (int i = 0; i < n; i++) {
-            long start = (startsMs == null) ? 0 : Math.max(0, startsMs[i]);
+            long start = commonStart;
             Path path = new Path();
             switch (types[i]) {
                 case TYPE_FLICK: {

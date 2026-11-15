@@ -154,17 +154,6 @@ public class FloatingControlService extends Service {
     /** 两次下发手势之间至少隔这么久（ms），别把系统输入队列塞爆 */
     private static final int MIN_FIRE_GAP_MS = 16;
 
-    /**
-     * 提前排程窗口（ms）：一次性把未来 70ms 内该点的音符全部塞进同一个手势，
-     * 用 StrokeDescription 的 startTime 让系统自己按时刻落下。
-     * <p>
-     * 这一步是精度的关键。以前是“到点一个发一个”，每个音符都要等上一个手势结束
-     * （每次约 37ms），密集段就会一路往后拖 20~40ms —— 实测把补偿从 0 调到 -30
-     * 只救回 4 个 Late（17 → 13），说明晚的量是逐音符累积的，不是固定的偏移。
-     * 现在时间由系统按 startTime 落点，不再受我们下发速度影响。
-     */
-    private static final int BATCH_LOOKAHEAD_MS = 70;
-
     /** 长按末尾多按一点（ms），宁可多按几十毫秒，也不要半路松手 */
     private static final int HOLD_MARGIN_MS = 60;
 
@@ -194,7 +183,7 @@ public class FloatingControlService extends Service {
     private static final int MAX_STROKES = 10;
 
     /** 点击按下时长（ms）。1~5ms 有些设备会丢触摸；太长又会卡住下一个音符 */
-    private static final int TAP_MS = 25;
+    private static final int TAP_MS = 20;
 
     /** 处理帧的最小间隔（ms），限制识别频率，防止空转吃满 CPU */
     private static final int FRAME_MIN_INTERVAL_MS = 8;
@@ -997,7 +986,8 @@ public class FloatingControlService extends Service {
             long now = SystemClock.uptimeMillis();
 
             if (now < gestureEndsAt) {
-                workerHandler.postDelayed(this, SCHEDULER_TICK_MS);
+                // 精确等到上一发手势结束的那一刻，别用固定 8ms 轮询（会白等半帧）
+                workerHandler.postDelayed(this, Math.max(1, gestureEndsAt - now));
                 return;
             }
             if (now < holdBusyUntil) {
@@ -1027,10 +1017,12 @@ public class FloatingControlService extends Service {
             long maxEnd = 0;
             long holdDur = 0;
 
-            // 第一步：收“现在到未来 70ms 之间”该点的音符（到点的和快到的都在这一发里）
+            // 只收“已经到点”的音符（未来 8ms 内也算到点）。
+            // 所有触点必须是**同一瞬间按下**——见 performBatchAt 里的注释，
+            // 用不同的 startTime 会直接触发 Android 输入系统的断言、把 system_server 打死。
             for (int i = pending.size() - 1; i >= 0 && n < MAX_STROKES; i--) {
                 PendingNote p = pending.get(i);
-                if (p.arrival > now + BATCH_LOOKAHEAD_MS) continue;
+                if (p.arrival > now + 8) continue;
                 if (now - p.arrival > LATE_TOLERANCE_MS) {
                     pending.remove(i);
                     statDropped++;
@@ -1040,31 +1032,11 @@ public class FloatingControlService extends Service {
                 xs[n] = p.x;
                 types[n] = p.type;
                 durs[n] = p.durMs;
-                starts[n] = (int) Math.max(0, p.arrival - now);
+                starts[n] = 0;
                 if (p.type == AutoClickService.TYPE_HOLD && p.durMs > holdDur) holdDur = p.durMs;
-                maxEnd = Math.max(maxEnd, starts[n] +
-                        (p.type == AutoClickService.TYPE_HOLD ? p.durMs + 12L : TAP_MS + 12L));
+                maxEnd = Math.max(maxEnd,
+                        p.type == AutoClickService.TYPE_HOLD ? p.durMs + 12L : TAP_MS + 12L);
                 n++;
-            }
-
-            // 第二步：这一发里有长按，就把长按期间（最多 PRESCHEDULE_MS）要点的音符
-            // 一起预排进同一个手势——它们的 startTime 是相对现在算的，
-            // 会在长按还按着的时候依次落下，不用再被系统“一次只能一个手势”卡住。
-            if (holdDur > 0) {
-                long horizon = now + Math.min(holdDur, PRESCHEDULE_MS);
-                for (int i = pending.size() - 1; i >= 0 && n < MAX_STROKES; i--) {
-                    PendingNote p = pending.get(i);
-                    if (p.arrival <= now + BATCH_LOOKAHEAD_MS) continue;   // 第一步已经收过
-                    if (p.arrival > horizon) continue;
-                    if (p.type == AutoClickService.TYPE_HOLD) continue;   // 一条手势里不放第二个长按
-                    notes[n] = p;
-                    xs[n] = p.x;
-                    types[n] = p.type;
-                    durs[n] = p.durMs;
-                    starts[n] = (int) Math.max(1, p.arrival - now);
-                    maxEnd = Math.max(maxEnd, starts[n] + TAP_MS + 12L);
-                    n++;
-                }
             }
 
             if (n == 0) {

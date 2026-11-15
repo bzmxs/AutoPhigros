@@ -72,18 +72,45 @@ public class FloatingControlService extends Service {
     private static final int JUDGE_TRACK_RANGE = 120;
 
     /**
-     * 触发线：判定线上方 70 像素的一条横线（录制像素）。
+     * 触发线：判定线上方 28 像素的一条横线（录制像素）。
      * 音符底边从“触发线上方”跨到“触发线下方”的那一帧，就是这个音符唯一一次被登记的时刻，
      * 然后按 距离÷速度 算出还要多久到判定线，到点了再点。
      * <p>
-     * 这样做的原因：只在判定线上方 12px 的窄带里找音符，音符穿过那条带只要十几毫秒，
-     * 60fps 下一帧就过去了，所以会“有时点得中、有时点不中”。
+     * 早先这里是 70 像素：提前量算成 ~130ms，而提前量 = 距离 ÷ 速度，
+     * 速度只要估偏 30%，点击就会早/晚三四十毫秒，密集谱面直接判 Miss。
+     * 现在提前量只有 28px（约 50ms），速度误差的影响被压到十几毫秒以内，
+     * 剩下的时间刚好补上“下发手势 → 游戏收到触摸”的那一两帧延迟。
      */
-    private static final int TRIGGER_UP = 70;
+    private static final int TRIGGER_UP = 28;
 
     /** 触发线上下各扫多少像素（录制像素） */
-    private static final int SCAN_UP = 46;
-    private static final int SCAN_DOWN = 46;
+    private static final int SCAN_UP = 42;
+    private static final int SCAN_DOWN = 34;
+
+    /**
+     * 提前量的上限（毫秒）。宁可按着算出来的时间点，也不要提前太久。
+     * 正常情况下 28px ÷ 500px/s ≈ 56ms，这里留到 150ms 给慢速谱面用。
+     */
+    private static final int LEAD_MAX_MS = 150;
+
+    /** 算提前量时速度的下限：速度估成 150 会让提前量翻倍，直接钳住 */
+    private static final float SPEED_FLOOR = 300f;
+
+    /**
+     * 时间补偿（ms）：整体往后挪一点再点。
+     * <p>
+     * 你那张结算图里是 Early 16 / Late 5 —— 早的明显多于晚的，
+     * 说明点击整体偏前（识别到 → 算时间 → 下发，整条链路每步都会“早一点点”）。
+     * 这里加 20ms 抵消，改大改小都能直接调这一个数。
+     */
+    private static final int TIMING_BIAS_MS = 20;
+
+    /**
+     * 又宽又扁、又不是 Hold 色的段 → 是背景亮块（歌曲封面、特效带），不是音符。
+     * 之前这种段会照样排队、发点击，落点全在画面中间，纯浪费手势通道。
+     */
+    private static final int BG_MAX_WIDTH = 200;
+    private static final int BG_MAX_HEIGHT = 12;
 
     /** 横向采样步长（录制像素） */
     private static final int X_STEP = 4;
@@ -134,9 +161,6 @@ public class FloatingControlService extends Service {
 
     /** 还没测出速度时，先按这么久（ms） */
     private static final int HOLD_FALLBACK_MS = 900;
-
-    /** 提前量上限（ms）：算出来到判定线还要更久的音符，先不排程，等它靠近再说 */
-    private static final int MAX_LEAD_MS = 400;
 
     /**
      * 下长按时，往后预排多远（ms）。
@@ -254,6 +278,8 @@ public class FloatingControlService extends Service {
     private long statFrameCostSum = 0;
     private long statFrameCostMax = 0;
     private long statHoldFires = 0;
+    /** 被“又宽又扁 = 背景亮块”规则过滤掉的段数，用来确认这条规则到底有没有生效 */
+    private long statBg = 0;
     /** 每帧耗时指数平均：超过 10ms 隔一帧识别，超过 16ms 隔两帧 */
     private float costEma = 0f;
     private int skipEvery = 0;
@@ -793,6 +819,13 @@ public class FloatingControlService extends Service {
             int widthCap = runLast[i] - runFirst[i] + X_STEP;
             int bottom = runBottom[i];
 
+            // 又宽又扁 = 背景亮块（封面、特效带），不是音符：
+            // 排进去只会往画面中间乱点，还占手势通道。Hold 是竖条，不受这条影响。
+            if (widthCap > BG_MAX_WIDTH && runHeight[i] < BG_MAX_HEIGHT && runClass[i] != COLOR_HOLD) {
+                statBg++;
+                continue;
+            }
+
             int prevBottom = -1, bestDx = Integer.MAX_VALUE;
             for (int j = 0; j < prevRunCount; j++) {
                 int dx = Math.abs(prevRunX[j] - centerX);
@@ -857,13 +890,16 @@ public class FloatingControlService extends Service {
 
         long lead;
         if (noteSpeed > 40f) {
-            lead = (long) ((judgeYCap - bottomY) * 1000f / noteSpeed);
+            // 速度估小会让提前量成倍放大（150px/s 时 28px 要 187ms），
+            // 那样点击会落在音符到达前一大截 → 游戏里就是 Miss。所以钳一个下限。
+            float v = Math.max(noteSpeed, SPEED_FLOOR);
+            lead = (long) ((judgeYCap - bottomY) * 1000f / v);
             if (lead < 0) lead = 0;
-            if (lead > MAX_LEAD_MS) lead = MAX_LEAD_MS;
+            if (lead > LEAD_MAX_MS) lead = LEAD_MAX_MS;
         } else {
             lead = 0;   // 速度还没测出来，先“看到就点”，至少不会完全不点
         }
-        long arrival = now + lead;
+        long arrival = now + lead + TIMING_BIAS_MS;
         int x = centerX * captureScale;
         int bucket = x / 40;
 
@@ -893,7 +929,9 @@ public class FloatingControlService extends Service {
     private int estimateHoldMs(int lengthCap) {
         if (noteSpeed < 40f) return HOLD_FALLBACK_MS;   // 速度还没测出来：先按久一点
         // 速度普遍会被估高一点，所以先打个折 => 算出来的时长偏长 => 按到底不会提前松手
-        float v = noteSpeed * HOLD_SPEED_BIAS;
+        // 但反过来速度偶尔被估成 150~220，时长会翻两倍多，直接按到 3 秒上限把后面的音符全堵住，
+        // 所以速度钳一个下限：最慢按 300px/s 算。
+        float v = Math.max(noteSpeed, SPEED_FLOOR) * HOLD_SPEED_BIAS;
         int ms = (int) (lengthCap * 1000f / v) + HOLD_MARGIN_MS;
         if (ms < HOLD_MIN_MS) ms = HOLD_MIN_MS;
         if (ms > HOLD_MAX_MS) ms = HOLD_MAX_MS;
@@ -1234,9 +1272,9 @@ public class FloatingControlService extends Service {
         final int queue = pending.size();
         final long costAvg = statFrameCostSum / Math.max(statFrames, 1);
         final String text = String.format(Locale.US,
-                "%dx%d %dfps c:%d/%d 队:%d 点:%d/s 丢:%d/s 总:%d 条:%d 宽:%d 长:%d v:%d",
+                "%dx%d %dfps c:%d/%d 队:%d 点:%d/s 丢:%d/s 背:%d 总:%d 条:%d 宽:%d 长:%d v:%d",
                 displayWidth, displayHeight, fps, costAvg, statFrameCostMax,
-                queue, clicksPerSec, droppedPerSec,
+                queue, clicksPerSec, droppedPerSec, statBg,
                 totalClicks, lastWidestRun, lastHoldWidth, lastHoldLen, (int) noteSpeed);
 
         // 每 2 秒往 Logcat 打一行：识别帧率 + 队列/下发/丢弃 + 判定线与速度（调参就看这个）
@@ -1244,8 +1282,8 @@ public class FloatingControlService extends Service {
         if (now - lastLogAt >= 2000 && statFrames > 0) {
             lastLogAt = now;
             Log.d(TAG, String.format(Locale.US,
-                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d",
-                    fps, costAvg, statFrameCostMax, queue, statClicks, statDropped, statHoldFires,
+                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d",
+                    fps, costAvg, statFrameCostMax, queue, statClicks, statDropped, statBg, statHoldFires,
                     statBlue, statRed, statTan,
                     judgeY, (int) noteSpeed, lastWidestRun, lastHoldWidth, lastHoldLen));
         }
@@ -1254,6 +1292,7 @@ public class FloatingControlService extends Service {
         statHits = 0;
         statClicks = 0;
         statDropped = 0;
+        statBg = 0;
         statBlue = 0;
         statRed = 0;
         statTan = 0;
@@ -1293,6 +1332,7 @@ public class FloatingControlService extends Service {
             statFrameCostSum = 0;
             statFrameCostMax = 0;
             statHoldFires = 0;
+            statBg = 0;
             costEma = 0f;
             skipEvery = 0;
             skipCounter = 0;

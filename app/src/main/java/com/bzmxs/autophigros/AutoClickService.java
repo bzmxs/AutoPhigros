@@ -135,6 +135,21 @@ public class AutoClickService extends AccessibilityService {
      */
     public static boolean performBatch(int[] xs, int[] types, int[] dursMs, int y, int count,
                                        Runnable onFinished) {
+        return performBatchAt(xs, types, dursMs, null, y, count, onFinished);
+    }
+
+    /**
+     * 和 {@link #performBatch} 一样，但每个触点可以带一个“延迟多少毫秒再按下”。
+     * <p>
+     * 这是为了解决“长按期间点不了”的问题：Android 一次只能跑一个手势，
+     * 但一个手势里可以塞多个触点，每个触点的 startTime 可以不同。
+     * 所以下长按的同时，把接下来 400ms 内要点的音符一起塞进同一个手势，
+     * 它们会在长按还按着的时候按 startTime 依次落下，不用等长按结束。
+     *
+     * @param startsMs 每个触点的延迟（毫秒），null 表示全部立即
+     */
+    public static boolean performBatchAt(int[] xs, int[] types, int[] dursMs, int[] startsMs,
+                                         int y, int count, Runnable onFinished) {
         if (instance == null) return false;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false;
         if (xs == null || count <= 0) return false;
@@ -142,24 +157,25 @@ public class AutoClickService extends AccessibilityService {
         int n = Math.min(count, maxStrokes());
         GestureDescription.Builder builder = new GestureDescription.Builder();
         for (int i = 0; i < n; i++) {
+            long start = (startsMs == null) ? 0 : Math.max(0, startsMs[i]);
             Path path = new Path();
             switch (types[i]) {
                 case TYPE_FLICK: {
                     path.moveTo(xs[i], y + FLICK_DY);
                     path.lineTo(xs[i], y - FLICK_DY);
-                    builder.addStroke(new GestureDescription.StrokeDescription(path, 0, FLICK_MS));
+                    builder.addStroke(new GestureDescription.StrokeDescription(path, start, FLICK_MS));
                     break;
                 }
                 case TYPE_HOLD: {
                     path.moveTo(xs[i], y);
                     builder.addStroke(new GestureDescription.StrokeDescription(
-                            path, 0, Math.max(dursMs[i], 50)));
+                            path, start, Math.max(dursMs[i], 50)));
                     break;
                 }
                 default: {
                     path.moveTo(xs[i], y);
                     builder.addStroke(new GestureDescription.StrokeDescription(
-                            path, 0, Math.max(dursMs[i], 1)));
+                            path, start, Math.max(dursMs[i], 1)));
                 }
             }
         }

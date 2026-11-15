@@ -138,6 +138,16 @@ public class FloatingControlService extends Service {
     /** 提前量上限（ms）：算出来到判定线还要更久的音符，先不排程，等它靠近再说 */
     private static final int MAX_LEAD_MS = 400;
 
+    /**
+     * 下长按时，往后预排多远（ms）。
+     * <p>
+     * Android 一次只能跑一个手势，长按会把手势通道一直占着，这期间的 Tap 自己发不出去。
+     * 但一个手势里可以放多个触点、每个触点有自己的 startTime，
+     * 所以下长按时把这段时间内到点的音符一起塞进同一个手势就行。
+     * 预排太远会让手势变长、抬手变晚，700ms 是折中。
+     */
+    private static final int PRESCHEDULE_MS = 700;
+
     /** 排程器多久看一次“有没有音符到点了”（ms） */
     private static final int SCHEDULER_TICK_MS = 8;
 
@@ -200,6 +210,10 @@ public class FloatingControlService extends Service {
 
     /** 音符下落速度（录制像素/秒）。0 = 还没测出来 */
     private float noteSpeed = 0f;
+    /** 最近 5 个速度样本，取中位数用（单帧估速噪声太大） */
+    private final float[] speedSamples = new float[5];
+    private int speedCount = 0;
+    private int speedIdx = 0;
 
     /** 最近一次排程的 Hold 条宽度（录制像素），0 = 还没遇到过 Hold。状态栏显示用 */
     private int lastHoldWidth = 0;
@@ -533,6 +547,8 @@ public class FloatingControlService extends Service {
         judgeCalibrated = false;
         judgeRatio = JUDGE_RATIO_FALLBACK;
         noteSpeed = 0f;
+        speedCount = 0;
+        speedIdx = 0;
         prevRunCount = 0;
     }
 
@@ -737,7 +753,7 @@ public class FloatingControlService extends Service {
         if (widest > 0) lastWidestRun = widest;
 
         long dt = now - prevRunAt;
-        if (dt > 4 && dt < 130 && prevRunCount > 0 && runCount > 0) {
+        if (dt >= 8 && dt <= 120 && prevRunCount > 0 && runCount > 0) {
             float sum = 0f;
             int matched = 0;
             for (int i = 0; i < runCount; i++) {
@@ -752,7 +768,7 @@ public class FloatingControlService extends Service {
                 }
                 if (bestJ >= 0 && bestDx <= 24) {
                     int dy = runBottom[i] - prevRunY[bestJ];
-                    if (dy >= 2 && dy <= 90) {   // 确实往下走了一段
+                    if (dy >= 2 && dy <= 60) {   // 确实往下走了一段
                         sum += dy;
                         matched++;
                     }
@@ -760,8 +776,13 @@ public class FloatingControlService extends Service {
             }
             if (matched > 0) {
                 float v = sum / matched * 1000f / dt;
-                if (v > 40f && v < 9000f) {
-                    noteSpeed = noteSpeed <= 0f ? v : noteSpeed * 0.75f + v * 0.25f;
+                // 单帧估出来的速度噪声很大（同一段被拆开、配对错位都会让它翻几倍），
+                // 直接 EMA 会让 lead 和 Hold 时长一起抖，所以取最近 5 个样本的中位数
+                if (v >= 150f && v <= 2000f) {
+                    speedSamples[speedIdx] = v;
+                    speedIdx = (speedIdx + 1) % speedSamples.length;
+                    if (speedCount < speedSamples.length) speedCount++;
+                    noteSpeed = medianSpeed();
                 }
             }
         }
@@ -817,9 +838,10 @@ public class FloatingControlService extends Service {
         int durMs;
         // 宽到离谱的段（整片亮色背景）一定不是 Hold：按下去就是一条假长按，
         // 会把手势通道占住好几秒，看起来就是“巨卡”。所以这里先卡宽度上限。
-        boolean holdLike = widthCap >= 16 && widthCap <= HOLD_MAX_WIDTH
-                && (cls == COLOR_HOLD || heightCap >= HOLD_MIN_HEIGHT
-                    || (widthCap >= HOLD_MIN_WIDTH && heightCap >= 24));
+        boolean holdLike = widthCap >= 12 && widthCap <= HOLD_MAX_WIDTH
+                && (cls == COLOR_HOLD
+                    ? heightCap >= 30
+                    : (widthCap >= HOLD_MIN_WIDTH && heightCap >= HOLD_MIN_HEIGHT));
         if (holdLike) {
             type = AutoClickService.TYPE_HOLD;
             durMs = estimateHoldMs(holdLengthCap);
@@ -881,11 +903,12 @@ public class FloatingControlService extends Service {
     }
 
     /**
-     * 排程器：每 6ms 看一眼队列里有没有到点的音符，到点就一次性下发。
+     * 排程器：每 8ms 看一眼队列里有没有到点的音符，到点就一次性下发。
      * <p>
      * 关键点：一次手势通道只能跑一个手势，所以这里自己排队——
-     * 上一发还没结束就等（now &lt; gestureEndsAt），
-     * 长按还在按着就把到期的轻点丢掉（Android 系统限制，没办法）。
+     * 上一发还没结束就等（now &lt; gestureEndsAt）。
+     * 长按会占住通道很久，所以下长按的同时把长按期间到点的轻点预排进同一个手势
+     * （见 {@link AutoClickService#performBatchAt}），只有超出预排窗口的才会丢。
      */
     private final Runnable schedulerTick = new Runnable() {
         @Override
@@ -918,10 +941,13 @@ public class FloatingControlService extends Service {
             int[] xs = new int[MAX_STROKES];
             int[] types = new int[MAX_STROKES];
             int[] durs = new int[MAX_STROKES];
+            int[] starts = new int[MAX_STROKES];
             PendingNote[] notes = new PendingNote[MAX_STROKES];
             int n = 0;
             long maxEnd = 0;
+            long holdDur = 0;
 
+            // 第一步：收“已经到点”的音符
             for (int i = pending.size() - 1; i >= 0 && n < MAX_STROKES; i--) {
                 PendingNote p = pending.get(i);
                 if (p.arrival > now + 4) continue;
@@ -934,9 +960,31 @@ public class FloatingControlService extends Service {
                 xs[n] = p.x;
                 types[n] = p.type;
                 durs[n] = p.durMs;
+                starts[n] = 0;
+                if (p.type == AutoClickService.TYPE_HOLD && p.durMs > holdDur) holdDur = p.durMs;
                 maxEnd = Math.max(maxEnd,
                         p.type == AutoClickService.TYPE_HOLD ? p.durMs + 12L : TAP_MS + 12L);
                 n++;
+            }
+
+            // 第二步：这一发里有长按，就把长按期间（最多 PRESCHEDULE_MS）要点的音符
+            // 一起预排进同一个手势——它们的 startTime 是相对现在算的，
+            // 会在长按还按着的时候依次落下，不用再被系统“一次只能一个手势”卡住。
+            if (holdDur > 0) {
+                long horizon = now + Math.min(holdDur, PRESCHEDULE_MS);
+                for (int i = pending.size() - 1; i >= 0 && n < MAX_STROKES; i--) {
+                    PendingNote p = pending.get(i);
+                    if (p.arrival <= now + 4) continue;        // 已经在第一步收过了
+                    if (p.arrival > horizon) continue;
+                    if (p.type == AutoClickService.TYPE_HOLD) continue;   // 一条手势里不放第二个长按
+                    notes[n] = p;
+                    xs[n] = p.x;
+                    types[n] = p.type;
+                    durs[n] = p.durMs;
+                    starts[n] = (int) Math.max(1, p.arrival - now);
+                    maxEnd = Math.max(maxEnd, starts[n] + TAP_MS + 12L);
+                    n++;
+                }
             }
 
             if (n == 0) {
@@ -945,20 +993,22 @@ public class FloatingControlService extends Service {
             }
 
             int y = judgeY * captureScale;
-            boolean ok = AutoClickService.performBatch(xs, types, durs, y, n, null);
+            boolean ok = AutoClickService.performBatchAt(xs, types, durs, starts, y, n, null);
             if (ok) {
                 // 按对象删，不用下标——万一队列被别处改过也不会 IndexOutOfBounds
                 for (int k = 0; k < n; k++) pending.remove(notes[k]);
                 gestureEndsAt = now + maxEnd;
-                boolean hasHold = false;
-                for (int k = 0; k < n; k++) {
-                    if (types[k] == AutoClickService.TYPE_HOLD) hasHold = true;
+                boolean hasHold = holdDur > 0;
+                if (hasHold) {
+                    // 预排窗口之外的音符还是发不出去，用这个标志把它们直接丢掉，别白试
+                    holdBusyUntil = now + Math.min(holdDur, PRESCHEDULE_MS);
+                    statHoldFires++;
                 }
-                if (hasHold) { holdBusyUntil = gestureEndsAt; statHoldFires++; }
                 lastFireAt = now;
                 statClicks++;
                 totalClicks++;
-                Log.d(TAG, "fire " + n + " note(s) at y=" + y + " hold=" + hasHold);
+                Log.d(TAG, "fire " + n + " note(s) at y=" + y + " hold=" + hasHold
+                        + " dur=" + holdDur);
             } else {
                 Log.w(TAG, "dispatch failed, retry next tick");
             }
@@ -1044,6 +1094,16 @@ public class FloatingControlService extends Service {
         return COLOR_NONE;
     }
 
+    /** 最近几个速度样本的中位数（样本少时就是它们的平均/单值） */
+    private float medianSpeed() {
+        int n = speedCount;
+        if (n <= 0) return 0f;
+        float[] tmp = new float[n];
+        System.arraycopy(speedSamples, 0, tmp, 0, n);
+        java.util.Arrays.sort(tmp);
+        return tmp[n / 2];
+    }
+
     /**
      * 从 (x, yBottom) 往上数，同色音符像素连续延伸多高（录制像素）。
      * Hold 是竖直长条，往上能延伸几百像素；Tap 是菱形，二三十；Drag 是横条，十几。
@@ -1051,9 +1111,10 @@ public class FloatingControlService extends Service {
     private int verticalExtent(ByteBuffer buffer, int x, int yBottom, int rowStride, int pixelStride) {
         if (x < 0 || yBottom < 0) return 0;
         int colBase = x * pixelStride;
-        int limit = Math.min(yBottom, 300);
+        int limit = Math.min(yBottom, 320);
         int gap = 0;
         int lastHit = -1;
+        boolean seenNote = false;
         // 隔行采样（y -= 2）：Hold 有几十上百像素高，隔行完全够用，
         // 但每帧要量 20 多段，隔行能把这里的开销直接砍一半
         for (int y = yBottom; y >= yBottom - limit; y -= 2) {
@@ -1061,7 +1122,15 @@ public class FloatingControlService extends Service {
             int r = buffer.get(off) & 0xFF;
             int g = buffer.get(off + 1) & 0xFF;
             int b = buffer.get(off + 2) & 0xFF;
-            if (noteClass(r, g, b) != COLOR_NONE) {
+            boolean note = noteClass(r, g, b) != COLOR_NONE;
+            int mx = Math.max(r, Math.max(g, b));
+            int mn = Math.min(r, Math.min(g, b));
+            // Hold 条的两端有白色高光、中间还可能夹一条白线。
+            // 这些白色像素必须算“条子的一部分”，否则一条 300px 的 Hold 会被量成 4px，
+            // 时长就按几毫秒算，长按一下就松手 —— 之前“长 Hold 没反应”就是这个原因。
+            boolean partOfBar = note || (seenNote && mx >= 150 && mx - mn <= 70);
+            if (partOfBar) {
+                if (note) seenNote = true;
                 lastHit = y;
                 gap = 0;
             } else if (++gap > 2) {
@@ -1215,6 +1284,8 @@ public class FloatingControlService extends Service {
             judgeCalibrated = false;   // 每局开始重新找一次判定线，换个游戏/换首歌也能自适应
             judgeY = -1;
             noteSpeed = 0f;
+            speedCount = 0;
+            speedIdx = 0;
             prevRunCount = 0;
             lastHoldWidth = 0;
             lastHoldLen = 0;

@@ -269,6 +269,10 @@ public class FloatingControlService extends Service {
     private long statBlue = 0, statRed = 0, statTan = 0;   // 每类颜色各扫到多少列，调参用
     /** 因为长时间按占着手势通道而没发出去的 Tap 数量 */
     private long statDropped = 0;
+    /** 因为“手势通道被长按占着”而丢的个数（这部分会直接变成 Miss） */
+    private long statDroppedHold = 0;
+    /** 因为“排到时已经晚了超过容忍值”而丢的个数 */
+    private long statDroppedLate = 0;
     private long lastStatAt = 0;
     private long lastLogAt = 0;
     private long totalClicks = 0;
@@ -995,6 +999,7 @@ public class FloatingControlService extends Service {
                     if (pending.get(i).arrival <= now + 8) {
                         pending.remove(i);
                         statDropped++;
+                        statDroppedHold++;
                     }
                 }
                 workerHandler.postDelayed(this, SCHEDULER_TICK_MS);
@@ -1026,6 +1031,7 @@ public class FloatingControlService extends Service {
                 if (now - p.arrival > LATE_TOLERANCE_MS) {
                     pending.remove(i);
                     statDropped++;
+                    statDroppedLate++;
                     continue;
                 }
                 notes[n] = p;
@@ -1301,8 +1307,9 @@ public class FloatingControlService extends Service {
         if (now - lastLogAt >= 2000 && statFrames > 0) {
             lastLogAt = now;
             Log.d(TAG, String.format(Locale.US,
-                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d bias=%d",
-                    fps, costAvg, statFrameCostMax, queue, statClicks, statDropped, statBg, statHoldFires,
+                    "fps=%d cost=%d/%dms 队列=%d 点击=%d 丢弃=%d 丢hold=%d 丢晚=%d 背景=%d hold=%d 蓝=%d 红=%d 米黄=%d judgeY=%d speed=%d 条=%d 宽=%d 长=%d bias=%d",
+                    fps, costAvg, statFrameCostMax, queue, statClicks, statDropped,
+                    statDroppedHold, statDroppedLate, statBg, statHoldFires,
                     statBlue, statRed, statTan,
                     judgeY, (int) noteSpeed, lastWidestRun, lastHoldWidth, lastHoldLen, timingBias));
         }
@@ -1311,6 +1318,8 @@ public class FloatingControlService extends Service {
         statHits = 0;
         statClicks = 0;
         statDropped = 0;
+        statDroppedHold = 0;
+        statDroppedLate = 0;
         statBg = 0;
         statBlue = 0;
         statRed = 0;

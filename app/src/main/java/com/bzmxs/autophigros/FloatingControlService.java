@@ -896,6 +896,15 @@ public class FloatingControlService extends Service {
      * 把一个刚跨过触发线的音符换算成“什么时候点、点什么、按多久”，放进待发队列。
      */
     private void scheduleNote(int centerX, int widthCap, int heightCap, int cls, int bottomY, int judgeYCap, long now) {
+        // 日志里大量 `w=4 h=52 cls=3` 这种“4px 宽、几十像素高”的细条，
+        // 其实是长条音符左右两条描边被单独当成了一段（颜色偏米黄）。
+        // 它们的中心和真正的音符差不了几像素，点了也只会多一次空点，
+        // 但会占掉手势里宝贵的触点名额，所以直接当背景丢掉。
+        if (widthCap <= 6 && heightCap <= 8) {
+            statBg++;
+            return;
+        }
+
         // Hold 的“剩余长度”= 竖着量到的高度 + 触发线到判定线那一小段
         final int holdLengthCap = heightCap + Math.max(0, judgeYCap - bottomY);
 

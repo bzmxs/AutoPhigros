@@ -154,6 +154,17 @@ public class FloatingControlService extends Service {
     /** 两次下发手势之间至少隔这么久（ms），别把系统输入队列塞爆 */
     private static final int MIN_FIRE_GAP_MS = 16;
 
+    /**
+     * 提前排程窗口（ms）：一次性把未来 70ms 内该点的音符全部塞进同一个手势，
+     * 用 StrokeDescription 的 startTime 让系统自己按时刻落下。
+     * <p>
+     * 这一步是精度的关键。以前是“到点一个发一个”，每个音符都要等上一个手势结束
+     * （每次约 37ms），密集段就会一路往后拖 20~40ms —— 实测把补偿从 0 调到 -30
+     * 只救回 4 个 Late（17 → 13），说明晚的量是逐音符累积的，不是固定的偏移。
+     * 现在时间由系统按 startTime 落点，不再受我们下发速度影响。
+     */
+    private static final int BATCH_LOOKAHEAD_MS = 70;
+
     /** 长按末尾多按一点（ms），宁可多按几十毫秒，也不要半路松手 */
     private static final int HOLD_MARGIN_MS = 60;
 
@@ -1007,10 +1018,10 @@ public class FloatingControlService extends Service {
             long maxEnd = 0;
             long holdDur = 0;
 
-            // 第一步：收“已经到点”的音符
+            // 第一步：收“现在到未来 70ms 之间”该点的音符（到点的和快到的都在这一发里）
             for (int i = pending.size() - 1; i >= 0 && n < MAX_STROKES; i--) {
                 PendingNote p = pending.get(i);
-                if (p.arrival > now + 4) continue;
+                if (p.arrival > now + BATCH_LOOKAHEAD_MS) continue;
                 if (now - p.arrival > LATE_TOLERANCE_MS) {
                     pending.remove(i);
                     statDropped++;
@@ -1020,10 +1031,10 @@ public class FloatingControlService extends Service {
                 xs[n] = p.x;
                 types[n] = p.type;
                 durs[n] = p.durMs;
-                starts[n] = 0;
+                starts[n] = (int) Math.max(0, p.arrival - now);
                 if (p.type == AutoClickService.TYPE_HOLD && p.durMs > holdDur) holdDur = p.durMs;
-                maxEnd = Math.max(maxEnd,
-                        p.type == AutoClickService.TYPE_HOLD ? p.durMs + 12L : TAP_MS + 12L);
+                maxEnd = Math.max(maxEnd, starts[n] +
+                        (p.type == AutoClickService.TYPE_HOLD ? p.durMs + 12L : TAP_MS + 12L));
                 n++;
             }
 
@@ -1034,7 +1045,7 @@ public class FloatingControlService extends Service {
                 long horizon = now + Math.min(holdDur, PRESCHEDULE_MS);
                 for (int i = pending.size() - 1; i >= 0 && n < MAX_STROKES; i--) {
                     PendingNote p = pending.get(i);
-                    if (p.arrival <= now + 4) continue;        // 已经在第一步收过了
+                    if (p.arrival <= now + BATCH_LOOKAHEAD_MS) continue;   // 第一步已经收过
                     if (p.arrival > horizon) continue;
                     if (p.type == AutoClickService.TYPE_HOLD) continue;   // 一条手势里不放第二个长按
                     notes[n] = p;
@@ -1068,7 +1079,7 @@ public class FloatingControlService extends Service {
                 statClicks++;
                 totalClicks++;
                 Log.d(TAG, "fire " + n + " note(s) at y=" + y + " hold=" + hasHold
-                        + " dur=" + holdDur);
+                        + " dur=" + holdDur + " span=" + maxEnd);
             } else {
                 Log.w(TAG, "dispatch failed, retry next tick");
             }

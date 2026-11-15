@@ -287,6 +287,9 @@ public class FloatingControlService extends Service {
     private long statHoldFires = 0;
     /** 被“又宽又扁 = 背景亮块”规则过滤掉的段数，用来确认这条规则到底有没有生效 */
     private long statBg = 0;
+    /** 每个 x 格子最近一次排队的时刻（去重用，格子宽 24 录制像素 ≈ 48 屏幕像素） */
+    private long[] lastQueueAt = new long[0];
+    private static final int QUEUE_DEDUPE_MS = 110;
     /** 每帧耗时指数平均：超过 10ms 隔一帧识别，超过 16ms 隔两帧 */
     private float costEma = 0f;
     private int skipEvery = 0;
@@ -592,6 +595,8 @@ public class FloatingControlService extends Service {
         captureHeight = Math.max(2, (h / captureScale) & ~1);
         captureDpi = dpi;   // 密度保持真实值，否则某些 App 的排布会变
 
+        lastQueueAt = new long[captureWidth / 24 + 2];
+
         gestureEndsAt = 0;
         holdBusyUntil = 0;
         pending.clear();
@@ -892,12 +897,23 @@ public class FloatingControlService extends Service {
      */
     private void scheduleNote(int centerX, int widthCap, int heightCap, int cls, int bottomY, int judgeYCap, long now) {
         // 日志里大量 `w=4 h=52 cls=3` 这种“4px 宽、几十像素高”的细条，
-        // 其实是长条音符左右两条描边被单独当成了一段（颜色偏米黄）。
-        // 它们的中心和真正的音符差不了几像素，点了也只会多一次空点，
-        // 但会占掉手势里宝贵的触点名额，所以直接当背景丢掉。
-        if (widthCap <= 6 && heightCap <= 8) {
+        // 其实是长条音符左右两条描边、或背景亮线被单独当成了一段。
+        // 真正的音符在 960x540 的录制画面里至少也有 16px 宽（钻石头）或近百像素（条），
+        // 所以宽度 ≤ 8 的一律当噪声。
+        if (widthCap <= 8) {
             statBg++;
             return;
+        }
+
+        // 同一个位置 110ms 内只排一次：同一个音符常被连续几帧识别成“颜色略不同的两段”，
+        // 或者补登路径反复命中，导致同一条音符被排 2~4 次、白白占掉手势通道。
+        if (lastQueueAt.length > 0) {
+            int qb = Math.min(lastQueueAt.length - 1, Math.max(0, centerX / 24));
+            if (now - lastQueueAt[qb] < QUEUE_DEDUPE_MS) {
+                statBg++;
+                return;
+            }
+            lastQueueAt[qb] = now;
         }
 
         // Hold 的“剩余长度”= 竖着量到的高度 + 触发线到判定线那一小段
@@ -1358,6 +1374,7 @@ public class FloatingControlService extends Service {
             speedCount = 0;
             speedIdx = 0;
             prevRunCount = 0;
+            if (lastQueueAt.length > 0) java.util.Arrays.fill(lastQueueAt, 0L);
             lastHoldWidth = 0;
             lastHoldLen = 0;
             lastFireAt = 0;

@@ -10,8 +10,8 @@ android {
         applicationId 'com.bzmxs.autophigros'
         minSdk 24
         targetSdk 34
-        versionCode 10
-        versionName '0.2.8-beta'
+        versionCode 11
+        versionName '0.2.9-beta'
     }
 
     buildTypes {
